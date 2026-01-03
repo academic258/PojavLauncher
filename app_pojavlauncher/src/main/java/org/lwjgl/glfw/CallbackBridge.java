@@ -18,6 +18,13 @@ import java.util.ArrayList;
 
 import dalvik.annotation.optimization.CriticalNative;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStreamWriter;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+
 public class CallbackBridge {
     public static final Choreographer sChoreographer = Choreographer.getInstance();
     private static boolean isGrabbing = false;
@@ -39,6 +46,13 @@ public class CallbackBridge {
     public static final FloatBuffer sGamepadAxisBuffer;
     public static boolean sGamepadDirectInput = false;
 
+    /* 新增：鼠标相对模式支持 */
+    private static boolean sIsRelativeMode = false;
+    private static float sRelativeMouseX = 0, sRelativeMouseY = 0;
+    private static float sLastMouseX = 0, sLastMouseY = 0;
+    private static final String MOUSE_LOG_TAG = "CallbackBridge";
+    private static final String LOG_FILE_PATH = "/sdcard/Download/callbackbridge_mouse_log.txt";
+
     public static void putMouseEventWithCoords(int button, float x, float y) {
         putMouseEventWithCoords(button, true, x, y);
         sChoreographer.postFrameCallbackDelayed(l -> putMouseEventWithCoords(button, false, x, y), 33);
@@ -49,11 +63,31 @@ public class CallbackBridge {
         sendMouseKeycode(button, CallbackBridge.getCurrentMods(), isDown);
     }
 
-
     public static void sendCursorPos(float x, float y) {
         mouseX = x;
         mouseY = y;
-        nativeSendCursorPos(mouseX, mouseY);
+        
+        // 记录原始位置
+        logMouseEvent("Raw sendCursorPos: (" + x + ", " + y + "), isGrabbing: " + isGrabbing + 
+                     ", isRelativeMode: " + sIsRelativeMode);
+        
+        if (sIsRelativeMode && isGrabbing) {
+            // 相对模式下，我们使用累计的相对移动
+            sRelativeMouseX += x;
+            sRelativeMouseY += y;
+            
+            // 限制在合理范围内
+            sRelativeMouseX = Math.max(0, Math.min(sRelativeMouseX, windowWidth));
+            sRelativeMouseY = Math.max(0, Math.min(sRelativeMouseY, windowHeight));
+            
+            logMouseEvent("Relative mode - accumulated: (" + sRelativeMouseX + ", " + sRelativeMouseY + ")");
+            
+            // 使用相对累计位置
+            nativeSendCursorPos(sRelativeMouseX, sRelativeMouseY);
+        } else {
+            // 绝对模式，直接发送
+            nativeSendCursorPos(mouseX, mouseY);
+        }
     }
 
     public static void sendKeycode(int keycode, char keychar, int scancode, int modifiers, boolean isDown) {
@@ -92,7 +126,6 @@ public class CallbackBridge {
     }
 
     public static void sendMouseKeycode(int button, int modifiers, boolean isDown) {
-        // if (isGrabbing()) DEBUG_STRING.append("MouseGrabStrace: " + android.util.Log.getStackTraceString(new Throwable()) + "\n");
         nativeSendMouseButton(button, isDown ? 1 : 0, modifiers);
     }
 
@@ -110,8 +143,42 @@ public class CallbackBridge {
     }
 
     public static boolean isGrabbing() {
-        // Avoid going through the JNI each time.
         return isGrabbing;
+    }
+
+    // 新增：设置相对模式
+    public static void setRelativeMouseMode(boolean relative) {
+        sIsRelativeMode = relative;
+        logMouseEvent("setRelativeMouseMode: " + relative);
+        
+        if (relative) {
+            // 重置相对位置
+            sRelativeMouseX = windowWidth / 2f;
+            sRelativeMouseY = windowHeight / 2f;
+            sLastMouseX = 0;
+            sLastMouseY = 0;
+        }
+    }
+    
+    // 新增：处理相对移动
+    public static void sendRelativeMouseMovement(float deltaX, float deltaY) {
+        if (sIsRelativeMode && isGrabbing) {
+            // 累加相对移动
+            sRelativeMouseX += deltaX;
+            sRelativeMouseY += deltaY;
+            
+            // 限制范围
+            sRelativeMouseX = Math.max(0, Math.min(sRelativeMouseX, windowWidth));
+            sRelativeMouseY = Math.max(0, Math.min(sRelativeMouseY, windowHeight));
+            
+            logMouseEvent("Relative movement - delta: (" + deltaX + ", " + deltaY + 
+                         "), accumulated: (" + sRelativeMouseX + ", " + sRelativeMouseY + ")");
+            
+            // 发送累计位置
+            mouseX = sRelativeMouseX;
+            mouseY = sRelativeMouseY;
+            nativeSendCursorPos(sRelativeMouseX, sRelativeMouseY);
+        }
     }
 
     // Called from JRE side
@@ -136,7 +203,6 @@ public class CallbackBridge {
             default: return null;
         }
     }
-
 
     public static int getCurrentMods() {
         int currMods = 0;
@@ -191,7 +257,14 @@ public class CallbackBridge {
     @SuppressWarnings("unused")
     @Keep
     private static void onGrabStateChanged(final boolean grabbing) {
+        boolean oldGrabbing = isGrabbing;
         isGrabbing = grabbing;
+        
+        // 抓取状态变化时设置相对模式
+        if (grabbing != oldGrabbing) {
+            setRelativeMouseMode(grabbing);
+        }
+        
         sChoreographer.postFrameCallbackDelayed((time) -> {
             // If the grab re-changed, skip notify process
             if(isGrabbing != grabbing) return;
@@ -204,12 +277,14 @@ public class CallbackBridge {
         }, 16);
 
     }
+    
     public static void addGrabListener(GrabListener listener) {
         synchronized (grabListeners) {
             listener.onGrabState(isGrabbing);
             grabListeners.add(listener);
         }
     }
+    
     public static void removeGrabListener(GrabListener listener) {
         synchronized (grabListeners) {
             grabListeners.remove(listener);
@@ -226,6 +301,51 @@ public class CallbackBridge {
         sDirectGamepadEnableHandler = new WeakReference<>(h);
     }
 
+    /* ================ 日志记录方法 ================ */
+    
+    private static void initLogFile() {
+        try {
+            File logFile = new File(LOG_FILE_PATH);
+            if (logFile.exists()) {
+                // 备份旧日志
+                String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+                File backupFile = new File(LOG_FILE_PATH + ".backup_" + timestamp);
+                logFile.renameTo(backupFile);
+            }
+            
+            FileOutputStream fos = new FileOutputStream(logFile);
+            OutputStreamWriter writer = new OutputStreamWriter(fos);
+            writer.write("=== CallbackBridge Mouse Log ===\n");
+            writer.write("Start time: " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(new Date()) + "\n");
+            writer.write("Android SDK: " + android.os.Build.VERSION.SDK_INT + "\n");
+            writer.write("================================\n\n");
+            writer.close();
+            fos.close();
+        } catch (Exception e) {
+            Log.e(MOUSE_LOG_TAG, "Failed to init log file", e);
+        }
+    }
+    
+    private static void logMouseEvent(String message) {
+        String timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
+        String logMessage = "[" + timestamp + "] " + message;
+        
+        Log.d(MOUSE_LOG_TAG, message);
+        writeToLogFile(logMessage);
+    }
+    
+    private static synchronized void writeToLogFile(String message) {
+        try {
+            FileOutputStream fos = new FileOutputStream(LOG_FILE_PATH, true);
+            OutputStreamWriter writer = new OutputStreamWriter(fos);
+            writer.write(message + "\n");
+            writer.close();
+            fos.close();
+        } catch (Exception e) {
+            Log.e(MOUSE_LOG_TAG, "Failed to write log", e);
+        }
+    }
+
     @Keep @CriticalNative public static native void nativeSetUseInputStackQueue(boolean useInputStackQueue);
 
     @Keep @CriticalNative private static native boolean nativeSendChar(char codepoint);
@@ -240,10 +360,14 @@ public class CallbackBridge {
     public static native void nativeSetWindowAttrib(int attrib, int value);
     private static native ByteBuffer nativeCreateGamepadButtonBuffer();
     private static native ByteBuffer nativeCreateGamepadAxisBuffer();
+    
     static {
         System.loadLibrary("pojavexec");
         sGamepadButtonBuffer = nativeCreateGamepadButtonBuffer();
         sGamepadAxisBuffer = createGamepadAxisBuffer();
+        
+        // 初始化日志文件
+        initLogFile();
+        logMouseEvent("CallbackBridge loaded");
     }
 }
-
