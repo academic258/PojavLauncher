@@ -35,34 +35,31 @@ jobs:
           wget https://github.com/PojavLauncherTeam/LTW/releases/latest/download/ltw-release.aar
 
       - name: Get JRE 8
-        uses: dawidd6/action-download-artifact@v9
-        with:
-          workflow: build.yml
-          path: app_pojavlauncher/src/main/assets/components/jre
-          workflow_conclusion: success
-          repo: PojavLauncherTeam/android-openjdk-build-multiarch
-          branch: buildjre8
-          name: jre8-pojav
+        run: |
+          mkdir -p app_pojavlauncher/src/main/assets/components/jre
+          cd app_pojavlauncher/src/main/assets/components/jre
+          wget -q -O jre8-pojav.zip "https://down.wss.show/qjmkjl1/i/uv/iuvvqjmkjl1?cdn_sign=1767419131-91-0-62d1f835a8c107c0f37aed7dbda974db&exp=1200&response-content-disposition=attachment%3B%20filename%3D%22jre8-pojav.zip%22%3B%20filename%2A%3Dutf-8%27%27jre8-pojav.zip"
+          unzip -q jre8-pojav.zip
+          rm jre8-pojav.zip
+          echo "JRE 8 downloaded and extracted"
 
       - name: Get JRE17
-        uses: dawidd6/action-download-artifact@v9
-        with:
-          workflow: build.yml
-          path: app_pojavlauncher/src/main/assets/components/jre-new
-          workflow_conclusion: success
-          repo: PojavLauncherTeam/android-openjdk-build-multiarch
-          branch: buildjre17-21
-          name: jre17-pojav
+        run: |
+          mkdir -p app_pojavlauncher/src/main/assets/components/jre-new
+          cd app_pojavlauncher/src/main/assets/components/jre-new
+          wget -q -O jre17-pojav.zip "https://down.wss.show/ias2mg5/i/uv/iuvwias2mg5?cdn_sign=1767419538-23-0-3c9d47c90fe27738b6be21816a5ca29b&exp=1200&response-content-disposition=attachment%3B%20filename%3D%22jre17-pojav.zip%22%3B%20filename%2A%3Dutf-8%27%27jre17-pojav.zip"
+          unzip -q jre17-pojav.zip
+          rm jre17-pojav.zip
+          echo "JRE 17 downloaded and extracted"
 
       - name: Get JRE21
-        uses: dawidd6/action-download-artifact@v9
-        with:
-          workflow: build.yml
-          path: app_pojavlauncher/src/main/assets/components/jre-21
-          workflow_conclusion: success
-          repo: PojavLauncherTeam/android-openjdk-build-multiarch
-          branch: buildjre17-21
-          name: jre21-pojav
+        run: |
+          mkdir -p app_pojavlauncher/src/main/assets/components/jre-21
+          cd app_pojavlauncher/src/main/assets/components/jre-21
+          wget -q -O jre21-pojav.zip "https://down.wss.show/nsw3iud/i/uv/iuvwnsw3iud?cdn_sign=1767419415-59-0-1821781e6862d7bb528005d6f4afbeb5&exp=1200&response-content-disposition=attachment%3B%20filename%3D%22jre21-pojav.zip%22%3B%20filename%2A%3Dutf-8%27%27jre21-pojav.zip"
+          unzip -q jre21-pojav.zip
+          rm jre21-pojav.zip
+          echo "JRE 21 downloaded and extracted"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -96,11 +93,12 @@ jobs:
 
       - name: Build APK without runtime
         run: |
-          rm -r app_pojavlauncher/src/main/assets/components/jre
-          rm -r app_pojavlauncher/src/main/assets/components/jre-new
-          rm -r app_pojavlauncher/src/main/assets/components/jre-21
+          rm -rf app_pojavlauncher/src/main/assets/components/jre
+          rm -rf app_pojavlauncher/src/main/assets/components/jre-new
+          rm -rf app_pojavlauncher/src/main/assets/components/jre-21
           gradle assembleDebug
           mv app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk out/app-debug-noruntime.apk
+          
       - name: Gen md5sums
         run: |
           md5sum out/app-debug.apk > out/app-debug.md5
@@ -134,4 +132,3 @@ jobs:
         with:
           name: app-debug-noruntime
           path: out/app-debug-noruntime.*
-
