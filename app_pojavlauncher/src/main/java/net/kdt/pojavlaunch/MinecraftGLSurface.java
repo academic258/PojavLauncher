@@ -13,7 +13,6 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
 import android.os.Build;
-import android.os.Environment;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.InputDevice;
@@ -45,13 +44,6 @@ import net.kdt.pojavlaunch.utils.JREUtils;
 import net.kdt.pojavlaunch.utils.MCOptionUtils;
 
 import org.lwjgl.glfw.CallbackBridge;
-
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.OutputStreamWriter;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
 
 import fr.spse.gamepad_remapper.GamepadHandler;
 import fr.spse.gamepad_remapper.RemapperManager;
@@ -95,17 +87,10 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
     private AndroidPointerCapture mPointerCapture;
     private boolean mLastGrabState = false;
     
-    /* 新增：鼠标控制相关 */
-    private float mLastMouseX = 0, mLastMouseY = 0;
-    private float mCenterX = 0, mCenterY = 0;
-    private boolean mIsFirstMouseMove = true;
+    /* 新增：光标隐藏相关变量 */
     private PointerIcon mTransparentPointerIcon = null;
     private boolean mIsCursorHidden = false;
-    
-    /* 日志 */
-    private static final String LOG_TAG = "MinecraftGLSurface";
-    private static final String LOG_FILE_PATH = Environment.getExternalStoragePublicDirectory(
-            Environment.DIRECTORY_DOWNLOADS) + "/minecraft_mouse_log.txt";
+    private static final String TAG = "MinecraftGLSurface";
 
     public MinecraftGLSurface(Context context) {
         this(context, null);
@@ -116,9 +101,8 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
         setFocusable(true);
         CallbackBridge.setDirectGamepadEnableHandler(this);
         
-        // 初始化鼠标控制
-        initMouseControl();
-        initLogFile();
+        // 初始化透明光标
+        initTransparentCursor();
     }
 
     @RequiresApi(api = Build.VERSION_CODES.O)
@@ -134,7 +118,6 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
      *                 when the cursor is not grabbed
      */
     public void start(boolean isAlreadyRunning, AbstractTouchpad touchpad){
-        logMessage("start called, isAlreadyRunning: " + isAlreadyRunning);
         if(Tools.isAndroid8OrHigher()) setUpPointerCapture(touchpad);
         mInGUIProcessor.setAbstractTouchpad(touchpad);
         if(LauncherPreferences.PREF_USE_ALTERNATE_SURFACE){
@@ -200,6 +183,9 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
 
             ((ViewGroup)getParent()).addView(textureView);
         }
+        
+        // 设置沉浸模式
+        setupImmersiveMode();
     }
 
     /**
@@ -216,7 +202,6 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
         for (int i = 0; i < e.getPointerCount(); i++) {
             int toolType = e.getToolType(i);
             if(toolType == MotionEvent.TOOL_TYPE_MOUSE) {
-                logMessage("Mouse detected in onTouchEvent, pointer: " + i);
                 if(Tools.isAndroid8OrHigher() &&
                         mPointerCapture != null) {
                     mPointerCapture.handleAutomaticCapture();
@@ -226,8 +211,7 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
 
             // Mouse found
             if(CallbackBridge.isGrabbing()) return false;
-            CallbackBridge.sendCursorPos(e.getX(i) * LauncherPreferences.PREF_SCALE_FACTOR, 
-                                        e.getY(i) * LauncherPreferences.PREF_SCALE_FACTOR);
+            CallbackBridge.sendCursorPos(   e.getX(i) * LauncherPreferences.PREF_SCALE_FACTOR, e.getY(i) * LauncherPreferences.PREF_SCALE_FACTOR);
             return true; //mouse event handled successfully
         }
         if (mIngameProcessor == null || mInGUIProcessor == null) return true;
@@ -250,111 +234,46 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
     public boolean dispatchGenericMotionEvent(MotionEvent event) {
         int mouseCursorIndex = -1;
 
-        logMessage("dispatchGenericMotionEvent - Action: " + event.getActionMasked() + 
-                  ", Source: " + event.getSource() + ", PointerCount: " + event.getPointerCount());
-
         if(Gamepad.isGamepadEvent(event)){
             if(mGamepadHandler == null) createGamepad(this, event.getDevice());
+
             mInputManager.handleMotionEventInput(getContext(), event, mGamepadHandler);
             return true;
         }
 
-        // 寻找鼠标指针
         for(int i = 0; i < event.getPointerCount(); i++) {
-            int toolType = event.getToolType(i);
-            if(toolType != MotionEvent.TOOL_TYPE_MOUSE && toolType != MotionEvent.TOOL_TYPE_STYLUS) continue;
+            if(event.getToolType(i) != MotionEvent.TOOL_TYPE_MOUSE && event.getToolType(i) != MotionEvent.TOOL_TYPE_STYLUS ) continue;
+            // Mouse found
             mouseCursorIndex = i;
-            logMessage("Found mouse pointer at index: " + i + ", toolType: " + toolType);
             break;
         }
-        if(mouseCursorIndex == -1) {
-            logMessage("No mouse pointer found");
-            return false;
-        }
+        if(mouseCursorIndex == -1) return false; // we cant consoom that, theres no mice!
 
-        // 更新抓取状态
+        // Make sure we grabbed the mouse if necessary
         updateGrabState(CallbackBridge.isGrabbing());
 
         switch(event.getActionMasked()) {
             case MotionEvent.ACTION_HOVER_MOVE:
-                float currentX = event.getX(mouseCursorIndex);
-                float currentY = event.getY(mouseCursorIndex);
-                
-                logMessage("ACTION_HOVER_MOVE - Current: (" + currentX + ", " + currentY + 
-                          "), isGrabbing: " + CallbackBridge.isGrabbing());
-                
-                if (CallbackBridge.isGrabbing()) {
-                    // 抓取模式：使用相对移动
-                    handleGrabbedMouseMovement(currentX, currentY);
-                    return true;
-                } else {
-                    // 非抓取模式：使用绝对位置
-                    float scaledX = currentX * LauncherPreferences.PREF_SCALE_FACTOR;
-                    float scaledY = currentY * LauncherPreferences.PREF_SCALE_FACTOR;
-                    CallbackBridge.mouseX = scaledX;
-                    CallbackBridge.mouseY = scaledY;
-                    CallbackBridge.sendCursorPos(scaledX, scaledY);
-                    return true;
-                }
-                
-            case MotionEvent.ACTION_SCROLL:
-                logMessage("ACTION_SCROLL - hscroll: " + event.getAxisValue(MotionEvent.AXIS_HSCROLL) + 
-                          ", vscroll: " + event.getAxisValue(MotionEvent.AXIS_VSCROLL));
-                CallbackBridge.sendScroll(event.getAxisValue(MotionEvent.AXIS_HSCROLL), 
-                                         event.getAxisValue(MotionEvent.AXIS_VSCROLL));
+                CallbackBridge.mouseX = (event.getX(mouseCursorIndex) * LauncherPreferences.PREF_SCALE_FACTOR);
+                CallbackBridge.mouseY = (event.getY(mouseCursorIndex) * LauncherPreferences.PREF_SCALE_FACTOR);
+                CallbackBridge.sendCursorPos(CallbackBridge.mouseX, CallbackBridge.mouseY);
                 return true;
-                
+            case MotionEvent.ACTION_SCROLL:
+                CallbackBridge.sendScroll(event.getAxisValue(MotionEvent.AXIS_HSCROLL), event.getAxisValue(MotionEvent.AXIS_VSCROLL));
+                return true;
             case MotionEvent.ACTION_BUTTON_PRESS:
-                logMessage("ACTION_BUTTON_PRESS - button: " + event.getActionButton());
-                return sendMouseButtonUnconverted(event.getActionButton(), true);
-                
+                return sendMouseButtonUnconverted(event.getActionButton(),true);
             case MotionEvent.ACTION_BUTTON_RELEASE:
-                logMessage("ACTION_BUTTON_RELEASE - button: " + event.getActionButton());
-                return sendMouseButtonUnconverted(event.getActionButton(), false);
-                
+                return sendMouseButtonUnconverted(event.getActionButton(),false);
             default:
-                logMessage("Unhandled motion event action: " + event.getActionMasked());
                 return false;
-        }
-    }
-    
-    /** 处理抓取模式下的鼠标移动 */
-    private void handleGrabbedMouseMovement(float currentX, float currentY) {
-        if (mIsFirstMouseMove) {
-            // 第一次移动，初始化位置
-            mLastMouseX = currentX;
-            mLastMouseY = currentY;
-            mCenterX = getWidth() / 2f;
-            mCenterY = getHeight() / 2f;
-            mIsFirstMouseMove = false;
-            logMessage("First mouse move in grab mode, initialized");
-            return;
-        }
-        
-        // 计算相对移动增量
-        float deltaX = (currentX - mLastMouseX) * (float)mSensitivityFactor * 2.0f;
-        float deltaY = (currentY - mLastMouseY) * (float)mSensitivityFactor * 2.0f;
-        
-        logMessage("Grab mode movement - Delta: (" + deltaX + ", " + deltaY + 
-                  "), Last: (" + mLastMouseX + ", " + mLastMouseY + ")");
-        
-        // 使用CallbackBridge的相对移动方法
-        CallbackBridge.sendRelativeMouseMovement(deltaX, deltaY);
-        
-        // 更新最后位置
-        mLastMouseX = currentX;
-        mLastMouseY = currentY;
-        
-        // 检查是否接近边缘，如果是则尝试重置
-        if (Math.abs(currentX - mCenterX) > getWidth() * 0.4f || 
-            Math.abs(currentY - mCenterY) > getHeight() * 0.4f) {
-            logMessage("Mouse near edge, attempting to reset");
-            resetMousePosition();
         }
     }
 
     /** The event for keyboard/ gamepad button inputs */
     public boolean processKeyEvent(KeyEvent event) {
+        //Log.i("KeyEvent", event.toString());
+
         //Filtering useless events by order of probability
         int eventKeycode = event.getKeyCode();
         if(eventKeycode == KeyEvent.KEYCODE_UNKNOWN) return true;
@@ -432,7 +351,6 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
 
     /** Same as refreshSize, but allows you to force an immediate size update **/
     public void refreshSize(boolean immediate) {
-        logMessage("refreshSize called, immediate: " + immediate);
         if(isInLayout() && !immediate) {
             post(this::refreshSize);
             return;
@@ -465,16 +383,10 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
         }
 
         CallbackBridge.sendUpdateWindowSize(windowWidth, windowHeight);
-        
-        // 更新中心位置
-        mCenterX = getWidth() / 2f;
-        mCenterY = getHeight() / 2f;
-        logMessage("Window size updated: " + windowWidth + "x" + windowHeight + 
-                  ", Center: (" + mCenterX + ", " + mCenterY + ")");
+
     }
 
     private void realStart(Surface surface){
-        logMessage("realStart called");
         // Initial size set. Request immedate refresh, otherwise the initial width and height for the game
         // may be broken/unknown.
         refreshSize(true);
@@ -504,8 +416,7 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
 
     @Override
     public void onGrabState(boolean isGrabbing) {
-        logMessage("onGrabState called: " + isGrabbing);
-        post(() -> updateGrabState(isGrabbing));
+        post(()->updateGrabState(isGrabbing));
     }
 
     private TouchEventProcessor pickEventProcessor(boolean isGrabbing) {
@@ -513,30 +424,18 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
     }
 
     private void updateGrabState(boolean isGrabbing) {
-        logMessage("updateGrabState: " + isGrabbing + ", lastGrabState: " + mLastGrabState);
         if(mLastGrabState != isGrabbing) {
             mCurrentTouchProcessor.cancelPendingActions();
             mCurrentTouchProcessor = pickEventProcessor(isGrabbing);
             mLastGrabState = isGrabbing;
             
-            // 更新鼠标状态
-            mIsFirstMouseMove = true;
-            
             // 更新光标可见性
-            updateMouseCursorVisibility(isGrabbing);
-            
-            // 进入沉浸模式
-            if (isGrabbing) {
-                enterImmersiveMode();
-            } else {
-                exitImmersiveMode();
-            }
+            updateCursorVisibility(isGrabbing);
         }
     }
 
     @Override
     public void onDirectGamepadEnabled() {
-        logMessage("onDirectGamepadEnabled called");
         post(()->{
             if(mGamepadHandler != null && mGamepadHandler instanceof Gamepad) {
                 ((Gamepad)mGamepadHandler).removeSelf();
@@ -558,75 +457,54 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
         }
     }
     
-    /* ================ 新增的鼠标控制方法 ================ */
+    /* ================ 新增的鼠标光标隐藏功能 ================ */
     
-    /** 初始化鼠标控制 */
-    private void initMouseControl() {
-        // 设置能接收鼠标事件
-        setFocusable(true);
-        setFocusableInTouchMode(true);
-        
-        // 初始化透明光标（Android 7+）
+    /**
+     * 初始化透明鼠标光标
+     */
+    private void initTransparentCursor() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             try {
                 Bitmap transparentBitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ALPHA_8);
                 transparentBitmap.eraseColor(Color.TRANSPARENT);
                 mTransparentPointerIcon = PointerIcon.create(transparentBitmap, 0, 0);
-                logMessage("Transparent cursor created");
+                Log.d(TAG, "Transparent cursor created");
             } catch (Exception e) {
-                logMessage("Failed to create transparent cursor: " + e.getMessage());
+                Log.e(TAG, "Failed to create transparent cursor", e);
             }
+        } else {
+            Log.d(TAG, "Android version < N, cannot create transparent cursor");
         }
-        
-        // 初始化中心位置
-        post(() -> {
-            mCenterX = getWidth() / 2f;
-            mCenterY = getHeight() / 2f;
-            logMessage("Initial center position: (" + mCenterX + ", " + mCenterY + ")");
-        });
     }
     
-    /** 更新鼠标光标可见性 */
-    private void updateMouseCursorVisibility(boolean hideCursor) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+    /**
+     * 更新鼠标光标可见性
+     */
+    private void updateCursorVisibility(boolean shouldHide) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && mTransparentPointerIcon != null) {
             post(() -> {
                 try {
-                    if (hideCursor && mTransparentPointerIcon != null) {
-                        // 隐藏光标
+                    if (shouldHide) {
                         setPointerIcon(mTransparentPointerIcon);
                         mIsCursorHidden = true;
-                        logMessage("Cursor hidden (transparent)");
+                        Log.d(TAG, "Cursor hidden");
                     } else {
-                        // 显示默认光标
+                        // 恢复默认光标
                         setPointerIcon(PointerIcon.getSystemIcon(getContext(), PointerIcon.TYPE_ARROW));
                         mIsCursorHidden = false;
-                        logMessage("Cursor shown (default arrow)");
+                        Log.d(TAG, "Cursor shown");
                     }
                 } catch (Exception e) {
-                    logMessage("Failed to update cursor visibility: " + e.getMessage());
+                    Log.e(TAG, "Failed to update cursor visibility", e);
                 }
             });
-        } else {
-            logMessage("Cannot update cursor visibility (Android version < N)");
         }
     }
     
-    /** 重置鼠标位置到中心 */
-    private void resetMousePosition() {
-        logMessage("resetMousePosition called");
-        
-        // 在Android中无法直接设置鼠标位置
-        // 但我们可以重置内部记录的位置，让下一次移动从中心开始计算
-        mLastMouseX = mCenterX;
-        mLastMouseY = mCenterY;
-        mIsFirstMouseMove = true;
-        
-        logMessage("Reset internal position to center: (" + mCenterX + ", " + mCenterY + ")");
-    }
-    
-    /** 进入沉浸模式 */
-    private void enterImmersiveMode() {
-        logMessage("Entering immersive mode");
+    /**
+     * 设置沉浸模式
+     */
+    private void setupImmersiveMode() {
         setSystemUiVisibility(
             View.SYSTEM_UI_FLAG_FULLSCREEN |
             View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
@@ -634,62 +512,29 @@ public class MinecraftGLSurface extends View implements GrabListener, DirectGame
             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         );
+        Log.d(TAG, "Immersive mode set");
     }
     
-    /** 退出沉浸模式 */
-    private void exitImmersiveMode() {
-        logMessage("Exiting immersive mode");
-        setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
-    }
-    
-    /* ================ 日志记录方法 ================ */
-    
-    /** 初始化日志文件 */
-    private void initLogFile() {
-        try {
-            File logFile = new File(LOG_FILE_PATH);
-            if (logFile.exists()) {
-                // 备份旧日志
-                String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
-                File backupFile = new File(LOG_FILE_PATH + ".backup_" + timestamp);
-                logFile.renameTo(backupFile);
-            }
-            
-            FileOutputStream fos = new FileOutputStream(logFile);
-            OutputStreamWriter writer = new OutputStreamWriter(fos);
-            writer.write("=== MinecraftGLSurface Mouse Log ===\n");
-            writer.write("Start time: " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(new Date()) + "\n");
-            writer.write("Android SDK: " + Build.VERSION.SDK_INT + "\n");
-            writer.write("Device: " + Build.MANUFACTURER + " " + Build.MODEL + "\n");
-            writer.write("=====================================\n\n");
-            writer.close();
-            fos.close();
-            
-            logMessage("Log file initialized at: " + LOG_FILE_PATH);
-        } catch (Exception e) {
-            Log.e(LOG_TAG, "Failed to initialize log file", e);
-        }
-    }
-    
-    /** 记录消息到日志文件和Logcat */
-    private void logMessage(String message) {
-        String timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
-        String logMessage = "[" + timestamp + "] " + message;
+    /**
+     * 重写窗口焦点变化回调，确保光标状态正确
+     */
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        Log.d(TAG, "onWindowFocusChanged: " + hasFocus + ", mIsCursorHidden: " + mIsCursorHidden);
         
-        Log.d(LOG_TAG, message);
-        writeToLogFile(logMessage);
-    }
-    
-    /** 将消息写入日志文件 */
-    private synchronized void writeToLogFile(String message) {
-        try {
-            FileOutputStream fos = new FileOutputStream(LOG_FILE_PATH, true);
-            OutputStreamWriter writer = new OutputStreamWriter(fos);
-            writer.write(message + "\n");
-            writer.close();
-            fos.close();
-        } catch (Exception e) {
-            Log.e(LOG_TAG, "Failed to write to log file", e);
+        if (hasFocus && mIsCursorHidden && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            // 重新应用透明光标
+            post(() -> {
+                try {
+                    if (mTransparentPointerIcon != null) {
+                        setPointerIcon(mTransparentPointerIcon);
+                        Log.d(TAG, "Cursor re-hidden on focus gain");
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to re-hide cursor", e);
+                }
+            });
         }
     }
 }
